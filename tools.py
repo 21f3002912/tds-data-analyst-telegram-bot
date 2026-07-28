@@ -1,7 +1,9 @@
+import io
 import ipaddress
 import socket
 from urllib.parse import urlparse
 
+import pandas as pd
 import requests
 
 
@@ -10,8 +12,6 @@ TIMEOUT_SECONDS = 20
 
 
 def _validate_public_url(url: str) -> None:
-    """Reject non-HTTP URLs and hosts resolving to private/local addresses."""
-
     parsed = urlparse(url)
 
     if parsed.scheme not in {"http", "https"}:
@@ -36,19 +36,14 @@ def _validate_public_url(url: str) -> None:
 
 
 def fetch_url(url: str) -> dict:
-    """
-    Fetch a public text/CSV/JSON resource and return its contents
-    with basic metadata.
-    """
+    """Fetch a public HTTP/HTTPS resource."""
 
     _validate_public_url(url)
 
     response = requests.get(
         url,
         timeout=TIMEOUT_SECONDS,
-        headers={
-            "User-Agent": "TDS-Data-Analyst-Bot/1.0",
-        },
+        headers={"User-Agent": "TDS-Data-Analyst-Bot/1.0"},
         stream=True,
     )
 
@@ -76,4 +71,86 @@ def fetch_url(url: str) -> dict:
         "content_type": response.headers.get("content-type", ""),
         "size_bytes": len(data),
         "content": text,
+    }
+
+
+def analyse_csv(
+    url: str,
+    operation: str,
+    column: str = "",
+    filter_column: str = "",
+    filter_value: str = "",
+) -> dict:
+    """
+    Analyse a public CSV using pandas.
+
+    Supported operations:
+    - row_count
+    - sum
+    - mean
+    - min
+    - max
+
+    Optionally filter rows first using filter_column and filter_value.
+    """
+
+    result = fetch_url(url)
+
+    df = pd.read_csv(io.StringIO(result["content"]))
+
+    # Normalise column names.
+    df.columns = [str(c).strip() for c in df.columns]
+
+    if filter_column:
+        if filter_column not in df.columns:
+            raise ValueError(
+                f"Filter column '{filter_column}' not found. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        df = df[
+            df[filter_column].astype(str).str.strip()
+            == str(filter_value).strip()
+        ]
+
+    operation = operation.lower().strip()
+
+    if operation == "row_count":
+        value = int(len(df))
+
+    else:
+        if not column:
+            raise ValueError(
+                f"Operation '{operation}' requires a column."
+            )
+
+        if column not in df.columns:
+            raise ValueError(
+                f"Column '{column}' not found. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        numeric = pd.to_numeric(df[column], errors="coerce")
+
+        if operation == "sum":
+            value = float(numeric.sum())
+
+        elif operation == "mean":
+            value = float(numeric.mean())
+
+        elif operation == "min":
+            value = float(numeric.min())
+
+        elif operation == "max":
+            value = float(numeric.max())
+
+        else:
+            raise ValueError(
+                "Unsupported operation. Use row_count, sum, mean, min, or max."
+            )
+
+    return {
+        "operation": operation,
+        "rows_after_filter": int(len(df)),
+        "result": value,
     }
