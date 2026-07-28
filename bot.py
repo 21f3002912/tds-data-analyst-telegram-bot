@@ -17,7 +17,6 @@ load_dotenv(".env")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Temporary until deployment gives us a public URL.
 LOG_URL = os.getenv("LOG_URL", "http://127.0.0.1:8000/run.jsonl")
 
 if not TELEGRAM_TOKEN:
@@ -114,13 +113,40 @@ Conversation:
 {conversation}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config={
-            "tools": [get_public_url, analyse_csv],
-        },
-    )
+    response = None
+    last_error = None
+
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config={
+                    "tools": [get_public_url, analyse_csv],
+                },
+            )
+            break
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt == 3:
+                raise
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                f"Gemini attempt {attempt + 1} failed: "
+                f"{type(exc).__name__}: {exc}. "
+                f"Retrying in {wait_seconds}s..."
+            )
+
+            time.sleep(wait_seconds)
+
+    if response is None:
+        raise RuntimeError(
+            f"Gemini failed after retries: {last_error}"
+        )
 
     if not response.text:
         raise RuntimeError("Gemini returned an empty response")
@@ -171,8 +197,7 @@ async def handle_message(
         if "answer" not in parsed:
             raise ValueError('Required key "answer" is missing')
 
-        # Do not trust the model to preserve the URL.
-        # Python sets the authoritative log URL.
+        # Python, rather than Gemini, controls the authoritative log URL.
         parsed["log_url"] = LOG_URL
 
         reply = json.dumps(
