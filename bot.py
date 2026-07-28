@@ -84,15 +84,33 @@ When a question provides a public URL containing data, use the
 get_public_url tool to retrieve the actual resource before answering.
 Do not invent values that should be obtained from supplied data.
 
-When the data is in a public CSV and the requested calculation can be
-performed using analyse_csv, use analyse_csv instead of calculating
-values yourself.
+When the question provides a public CSV or JSON dataset, prefer
+analyse_csv for deterministic analysis rather than calculating values
+yourself.
 
-Prefer tool-computed numerical results over estimating or manually
-calculating from raw CSV text.
+analyse_csv supports:
+columns, row_count, unique_count, unique_values, sum, mean, median,
+min, max, std, variance, correlation, value_counts, group_sum,
+group_mean, group_count, top, and bottom.
 
-Use get_public_url when you need to inspect the contents, structure,
-column names, or other information about a public resource.
+It also supports equality filtering, grouping, sorting, limits, and a
+second numeric column for correlation.
+
+If you do not know the dataset's column names or structure, first use
+analyse_csv with operation="columns" or use get_public_url to inspect
+the resource. Then perform the required analysis with analyse_csv.
+
+For aggregation, filtering, grouping, ranking, counting, descriptive
+statistics, and correlation, use analyse_csv whenever it can answer
+the question. Do not estimate or manually calculate a result that the
+tool can compute.
+
+Use get_public_url when you need to inspect raw contents or when
+analyse_csv cannot perform the requested operation.
+
+Pay close attention to the requested answer type and shape. Return a
+float when a float is requested, an integer when an integer is
+requested, and preserve requested strings, arrays, or objects exactly.
 
 Perform the required analysis carefully.
 
@@ -100,7 +118,8 @@ Return ONLY one valid JSON object with exactly these outer keys:
 
 {{"answer": <answer>, "log_url": "{LOG_URL}"}}
 
-The value of "answer" must follow exactly the shape requested by the user.
+The value of "answer" must follow exactly the shape requested by the
+user.
 
 Always set "log_url" to exactly:
 {LOG_URL}
@@ -130,7 +149,23 @@ Conversation:
         except Exception as exc:
             last_error = exc
 
-            if attempt == 3:
+            error_text = str(exc).lower()
+
+            retryable = any(
+                marker in error_text
+                for marker in [
+                    "503",
+                    "unavailable",
+                    "high demand",
+                    "429",
+                    "resource_exhausted",
+                    "rate limit",
+                    "timeout",
+                    "timed out",
+                ]
+            )
+
+            if not retryable or attempt == 3:
                 raise
 
             wait_seconds = 2 ** attempt
