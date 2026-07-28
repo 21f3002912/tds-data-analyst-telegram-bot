@@ -221,21 +221,16 @@ async def handle_message(
         )
 
 
-def main() -> None:
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+application = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .updater(None)
+    .build()
+)
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
-        )
+application.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_message,
     )
-
-    print("TDS Data Analyst Agent running...")
-    print(f"Log URL: {LOG_URL}")
-
-    application.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+)
