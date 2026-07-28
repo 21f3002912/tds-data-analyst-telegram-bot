@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from flask import Flask, Response
@@ -30,7 +31,9 @@ def run_log():
 
 
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+
     app.run(
         host="0.0.0.0",
-        port=8000,
+        port=port,
     )
