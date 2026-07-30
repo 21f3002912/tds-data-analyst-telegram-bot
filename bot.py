@@ -43,6 +43,12 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 conversation_history: dict[int, list[str]] = {}
 MAX_HISTORY = 10
 
+# Keep track of Telegram updates already processed.
+# This prevents Telegram retries from producing duplicate replies.
+processed_update_ids: set[int] = set()
+MAX_PROCESSED_UPDATES = 1000
+
+
 # Primary model plus fallback model.
 GEMINI_MODELS = [
     "gemini-3.6-flash",
@@ -255,6 +261,23 @@ async def handle_message(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
 
+    # Prevent the same Telegram update from being processed twice.
+    update_id = update.update_id
+
+    if update_id in processed_update_ids:
+        print(
+            f"Duplicate Telegram update ignored: {update_id}",
+            flush=True,
+        )
+        return
+
+    processed_update_ids.add(update_id)
+
+    # Keep the in-memory duplicate tracker bounded.
+    if len(processed_update_ids) > MAX_PROCESSED_UPDATES:
+        processed_update_ids.clear()
+        processed_update_ids.add(update_id)
+
     if (
         update.message is None
         or update.message.text is None
@@ -371,7 +394,7 @@ async def handle_message(
 
         # TEMPORARY DEBUGGING:
         # Return the real exception instead of answer:null.
-        # Once deployment is verified, we can change this
+        # Once deployment is verified, this can be changed
         # back to a cleaner production failure response.
         await update.message.reply_text(
             json.dumps(
@@ -397,4 +420,3 @@ application.add_handler(
         filters.TEXT & ~filters.COMMAND,
         handle_message,
     )
-)
