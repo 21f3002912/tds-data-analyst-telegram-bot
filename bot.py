@@ -420,3 +420,4 @@ application.add_handler(
         filters.TEXT & ~filters.COMMAND,
         handle_message,
     )
+)
