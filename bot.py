@@ -6,7 +6,12 @@ import time
 from dotenv import load_dotenv
 from google import genai
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from run_logger import log_event
 from tools import analyse_csv, fetch_url
@@ -17,19 +22,34 @@ load_dotenv(".env")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-LOG_URL = os.getenv("LOG_URL", "http://127.0.0.1:8000/run.jsonl")
+LOG_URL = os.getenv(
+    "LOG_URL",
+    "http://127.0.0.1:8000/run.jsonl",
+)
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is missing from .env")
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN is missing from .env"
+    )
 
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing from .env")
+    raise RuntimeError(
+        "GEMINI_API_KEY is missing from .env"
+    )
 
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 conversation_history: dict[int, list[str]] = {}
 MAX_HISTORY = 10
+
+# Primary model plus fallback model.
+GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+]
+
+RETRIES_PER_MODEL = 3
 
 
 def get_public_url(url: str) -> dict:
@@ -45,6 +65,8 @@ def get_public_url(url: str) -> dict:
 
     result = fetch_url(url)
 
+    # Prevent extremely large resources from being returned
+    # directly to the model.
     content = result["content"][:200_000]
 
     tool_result = {
@@ -132,61 +154,100 @@ Conversation:
 {conversation}
 """
 
-    response = None
     last_error = None
 
-    for attempt in range(4):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=prompt,
-                config={
-                    "tools": [get_public_url, analyse_csv],
-                },
-            )
-            break
+    for model in GEMINI_MODELS:
 
-        except Exception as exc:
-            last_error = exc
+        for attempt in range(RETRIES_PER_MODEL):
 
-            error_text = str(exc).lower()
+            try:
+                print(
+                    f"Trying {model}, "
+                    f"attempt {attempt + 1}/"
+                    f"{RETRIES_PER_MODEL}",
+                    flush=True,
+                )
 
-            retryable = any(
-                marker in error_text
-                for marker in [
-                    "503",
-                    "unavailable",
-                    "high demand",
-                    "429",
-                    "resource_exhausted",
-                    "rate limit",
-                    "timeout",
-                    "timed out",
-                ]
-            )
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config={
+                        "tools": [
+                            get_public_url,
+                            analyse_csv,
+                        ],
+                    },
+                )
 
-            if not retryable or attempt == 3:
-                raise
+                if not response.text:
+                    raise RuntimeError(
+                        f"{model} returned an empty response"
+                    )
 
-            wait_seconds = 2 ** attempt
+                print(
+                    f"SUCCESS using {model}",
+                    flush=True,
+                )
 
-            print(
-                f"Gemini attempt {attempt + 1} failed: "
-                f"{type(exc).__name__}: {exc}. "
-                f"Retrying in {wait_seconds}s..."
-            )
+                print(
+                    f"RAW GEMINI RESPONSE: "
+                    f"{response.text!r}",
+                    flush=True,
+                )
 
-            time.sleep(wait_seconds)
+                return response.text.strip()
 
-    if response is None:
-        raise RuntimeError(
-            f"Gemini failed after retries: {last_error}"
+            except Exception as exc:
+                last_error = exc
+
+                error_text = str(exc).lower()
+
+                print(
+                    f"{model} attempt "
+                    f"{attempt + 1} failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+                retryable = any(
+                    marker in error_text
+                    for marker in [
+                        "503",
+                        "unavailable",
+                        "high demand",
+                        "429",
+                        "resource_exhausted",
+                        "rate limit",
+                        "timeout",
+                        "timed out",
+                    ]
+                )
+
+                # Programming/configuration/tool errors should
+                # not be hidden by repeatedly trying models.
+                if not retryable:
+                    raise
+
+                if attempt < RETRIES_PER_MODEL - 1:
+                    wait_seconds = 2 ** attempt
+
+                    print(
+                        f"Retrying {model} in "
+                        f"{wait_seconds}s...",
+                        flush=True,
+                    )
+
+                    time.sleep(wait_seconds)
+
+        print(
+            f"{model} unavailable after retries. "
+            f"Trying fallback model...",
+            flush=True,
         )
 
-    if not response.text:
-        raise RuntimeError("Gemini returned an empty response")
-
-    return response.text.strip()
+    raise RuntimeError(
+        f"All Gemini models failed: {last_error}"
+    )
 
 
 async def handle_message(
@@ -194,7 +255,10 @@ async def handle_message(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
 
-    if update.message is None or update.message.text is None:
+    if (
+        update.message is None
+        or update.message.text is None
+    ):
         return
 
     chat = update.effective_chat
@@ -209,11 +273,17 @@ async def handle_message(
     log_event(
         "run_start",
         chat_id=chat_id,
-        data={"message": question},
+        data={
+            "message": question,
+        },
     )
 
     try:
-        history = conversation_history.setdefault(chat_id, [])
+        history = conversation_history.setdefault(
+            chat_id,
+            [],
+        )
+
         history.append(question)
 
         if len(history) > MAX_HISTORY:
@@ -224,15 +294,25 @@ async def handle_message(
             history.copy(),
         )
 
+        print(
+            f"RESULT BEFORE JSON PARSE: {result!r}",
+            flush=True,
+        )
+
         parsed = json.loads(result)
 
         if not isinstance(parsed, dict):
-            raise ValueError("Gemini response is not a JSON object")
+            raise ValueError(
+                "Gemini response is not a JSON object"
+            )
 
         if "answer" not in parsed:
-            raise ValueError('Required key "answer" is missing')
+            raise ValueError(
+                'Required key "answer" is missing'
+            )
 
-        # Python, rather than Gemini, controls the authoritative log URL.
+        # Python, rather than Gemini, controls
+        # the authoritative log URL.
         parsed["log_url"] = LOG_URL
 
         reply = json.dumps(
@@ -241,7 +321,10 @@ async def handle_message(
             ensure_ascii=False,
         )
 
-        elapsed = round(time.monotonic() - started, 3)
+        elapsed = round(
+            time.monotonic() - started,
+            3,
+        )
 
         log_event(
             "run_complete",
@@ -253,10 +336,23 @@ async def handle_message(
             },
         )
 
+        print(
+            f"SUCCESS: answer="
+            f"{parsed['answer']!r}",
+            flush=True,
+        )
+
         await update.message.reply_text(reply)
 
     except Exception as exc:
-        elapsed = round(time.monotonic() - started, 3)
+        elapsed = round(
+            time.monotonic() - started,
+            3,
+        )
+
+        error_message = (
+            f"{type(exc).__name__}: {exc}"
+        )
 
         log_event(
             "run_error",
@@ -268,15 +364,23 @@ async def handle_message(
             },
         )
 
-        print(f"ERROR: {type(exc).__name__}: {exc}")
+        print(
+            f"ERROR: {error_message}",
+            flush=True,
+        )
 
+        # TEMPORARY DEBUGGING:
+        # Return the real exception instead of answer:null.
+        # Once deployment is verified, we can change this
+        # back to a cleaner production failure response.
         await update.message.reply_text(
             json.dumps(
                 {
-                    "answer": None,
+                    "answer": error_message,
                     "log_url": LOG_URL,
                 },
                 separators=(",", ":"),
+                ensure_ascii=False,
             )
         )
 
